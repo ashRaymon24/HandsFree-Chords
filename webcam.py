@@ -19,6 +19,8 @@ class NoddStages:
         self.gestureDirection = None  # UP, DOWN, or None
         self.isUpNod = False
         self.isDownNod = False
+        self.isLeftNod = False
+        self.isRightNod = False
         self.prevState = None
         self.prev_average_y = None
         self.prev_average_x = None
@@ -29,8 +31,14 @@ class NoddStages:
         self.sensitivity_up_return = 0.01
         self.sensitivity_down_away = 0.01
         self.sensitivity_down_return = 0.01
+        self.sensitivity_left_away = 0.01
+        self.sensitivity_left_return = 0.01
+        self.sensitivity_right_away = 0.01
+        self.sensitivity_right_return = 0.01
         self.cooldown_ms = 800  # Prevent rapid nod re-detection
         self.last_nod_time = 0
+        self.idle_cooldown_ms = 400 #If no movement is detected for this time, reset the state machine
+        self.last_movement_time = float('inf')  # Initialize to negative infinity to ensure the first movement is detected
     def reset_tracking(self):
         """Reset the state machine and buffers to initial state."""
         self.state = "IDLE"
@@ -41,7 +49,9 @@ class NoddStages:
         self.x_buffer.clear()
         self.isDownNod = False
         self.isUpNod = False
-
+        self.isLeftNod = False
+        self.isRightNod = False
+        self.last_movement_time = float('inf')
     def parse_landmarks(self, face):
         """Extract facial landmarks and return smoothed position changes."""
         if not face:
@@ -72,7 +82,9 @@ class NoddStages:
         if timestamp_ms - self.last_nod_time < self.cooldown_ms:
             self.reset_tracking()
             return
-        
+        if timestamp_ms - self.last_movement_time > self.idle_cooldown_ms:
+            self.reset_tracking()
+            return
         result = self.parse_landmarks(face)
         if not result:
             self.reset_tracking()
@@ -80,21 +92,40 @@ class NoddStages:
         delta_y, delta_x, smooth_y, smooth_x = result
 
         if self.state == "IDLE":
+            self.last_movement_time = timestamp_ms
             if delta_y > self.sensitivity_down_away:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "DOWN"
+                self.last_movement_time = timestamp_ms
                 print("Moving down")
             elif delta_y < -self.sensitivity_up_away:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "UP"
+                self.last_movement_time = timestamp_ms
                 print("Moving up")
-                
+            elif delta_x > self.sensitivity_right_away:
+                self.state = "MOVING_AWAY"
+                self.gestureDirection = "LEFT"
+                self.last_movement_time = timestamp_ms
+                print("Moving left")
+            elif delta_x < -self.sensitivity_left_away:
+                self.state = "MOVING_AWAY"
+                self.gestureDirection = "RIGHT"
+                self.last_movement_time = timestamp_ms
+                print("Moving right")
         elif self.state == "MOVING_AWAY":
             if delta_y < -self.sensitivity_down_return and self.gestureDirection == "DOWN":
                 self.state = "RETURNING"
+                self.last_movement_time = timestamp_ms
             elif delta_y > self.sensitivity_up_return and self.gestureDirection == "UP":
                 self.state = "RETURNING"
-                
+                self.last_movement_time = timestamp_ms
+            elif delta_x < -self.sensitivity_right_return and self.gestureDirection == "LEFT":
+                self.state = "RETURNING"
+                self.last_movement_time = timestamp_ms
+            elif delta_x > self.sensitivity_left_return and self.gestureDirection == "RIGHT":
+                self.state = "RETURNING"
+                self.last_movement_time = timestamp_ms
         elif self.state == "RETURNING":
             if self.gestureDirection == "DOWN" and delta_y < -self.sensitivity_down_return:
                 self.state = "IDLE"
@@ -106,7 +137,16 @@ class NoddStages:
                 self.isUpNod = True
                 self.last_nod_time = timestamp_ms
                 print("Up Nod detected!")
-        
+            elif self.gestureDirection == "LEFT" and delta_x < -self.sensitivity_right_return:
+                self.state = "IDLE"
+                self.isLeftNod = True
+                self.last_nod_time = timestamp_ms
+                print("Left Nod detected!")
+            elif self.gestureDirection == "RIGHT" and delta_x > self.sensitivity_left_return:
+                self.state = "IDLE"
+                self.isRightNod = True
+                self.last_nod_time = timestamp_ms
+                print("Right Nod detected!")
         self.prev_average_y = smooth_y
         self.prev_average_x = smooth_x
         
