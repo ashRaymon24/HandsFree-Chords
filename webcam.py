@@ -3,6 +3,7 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import requests
 
 BaseOptions = python.BaseOptions
 FaceLandmarker = vision.FaceLandmarker
@@ -10,13 +11,11 @@ FaceLandmarkerOptions = vision.FaceLandmarkerOptions
 RunningMode = vision.RunningMode
 
 class NoddStages:
-    """
-    Detects head nod gestures (up and down) using facial landmarks.
-    Uses a state machine to track the progression of a nod from idle -> moving away -> returning -> idle.
-    """
+    """Track head motion and turn it into gestures."""
     def __init__(self):
-        self.state = "IDLE"  # IDLE, MOVING_AWAY, or RETURNING
-        self.gestureDirection = None  # UP, DOWN, or None
+        # A small state machine helps filter out random head movement.
+        self.state = "IDLE"
+        self.gestureDirection = None
         self.isUpNod = False
         self.isDownNod = False
         self.isLeftNod = False
@@ -35,25 +34,26 @@ class NoddStages:
         self.sensitivity_left_return = 0.01
         self.sensitivity_right_away = 0.01
         self.sensitivity_right_return = 0.01
-        self.cooldown_ms = 800  # Prevent rapid nod re-detection
+        self.cooldown_ms = 800
         self.last_nod_time = 0
-        self.idle_cooldown_ms = 400 #If no movement is detected for this time, reset the state machine
-        self.last_movement_time = float('inf')  # Initialize to negative infinity to ensure the first movement is detected
+        self.idle_cooldown_ms = 400
+        self.last_movement_time = float('inf')
     def reset_tracking(self):
-        """Reset the state machine and buffers to initial state."""
+        """Reset tracking state."""
         self.state = "IDLE"
         self.gestureDirection = None
         self.prev_average_y = None
         self.prev_average_x = None
         self.y_buffer.clear()
         self.x_buffer.clear()
+        # Smooth the landmark position a bit so the detector isn't twitchy.
         self.isDownNod = False
         self.isUpNod = False
         self.isLeftNod = False
         self.isRightNod = False
         self.last_movement_time = float('inf')
     def parse_landmarks(self, face):
-        """Extract facial landmarks and return smoothed position changes."""
+        """Return smoothed landmark deltas."""
         if not face:
             return None
         nose_tip = face[1]
@@ -78,7 +78,7 @@ class NoddStages:
         return delta_y, delta_x, smooth_y, smooth_x
     
     def update(self, face, timestamp_ms):
-        """Update nod detection state machine. States: IDLE -> MOVING_AWAY -> RETURNING -> IDLE."""
+        """Advance the gesture state machine."""
         if timestamp_ms - self.last_nod_time < self.cooldown_ms:
             self.reset_tracking()
             return
@@ -97,22 +97,22 @@ class NoddStages:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "DOWN"
                 self.last_movement_time = timestamp_ms
-                print("Moving down")
+                print("Down motion")
             elif delta_y < -self.sensitivity_up_away:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "UP"
                 self.last_movement_time = timestamp_ms
-                print("Moving up")
+                print("Up motion")
             elif delta_x > self.sensitivity_right_away:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "LEFT"
                 self.last_movement_time = timestamp_ms
-                print("Moving left")
+                print("Left motion")
             elif delta_x < -self.sensitivity_left_away:
                 self.state = "MOVING_AWAY"
                 self.gestureDirection = "RIGHT"
                 self.last_movement_time = timestamp_ms
-                print("Moving right")
+                print("Right motion")
         elif self.state == "MOVING_AWAY":
             if delta_y < -self.sensitivity_down_return and self.gestureDirection == "DOWN":
                 self.state = "RETURNING"
@@ -131,22 +131,22 @@ class NoddStages:
                 self.state = "IDLE"
                 self.isDownNod = True
                 self.last_nod_time = timestamp_ms
-                print("Down Nod detected!")
+                print("Down nod detected")
             elif self.gestureDirection == "UP" and delta_y > self.sensitivity_up_return:
                 self.state = "IDLE"
                 self.isUpNod = True
                 self.last_nod_time = timestamp_ms
-                print("Up Nod detected!")
+                print("Up nod detected")
             elif self.gestureDirection == "LEFT" and delta_x < -self.sensitivity_right_return:
                 self.state = "IDLE"
                 self.isLeftNod = True
                 self.last_nod_time = timestamp_ms
-                print("Left Nod detected!")
+                print("Left nod detected")
             elif self.gestureDirection == "RIGHT" and delta_x > self.sensitivity_left_return:
                 self.state = "IDLE"
                 self.isRightNod = True
                 self.last_nod_time = timestamp_ms
-                print("Right Nod detected!")
+                print("Right nod detected")
         self.prev_average_y = smooth_y
         self.prev_average_x = smooth_x
         
@@ -166,16 +166,16 @@ with FaceLandmarker.create_from_options(options) as landmarker:
         if not success:
             continue
 
-        #Convert BGR → RGB
+        # BGR to RGB.
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        #Create MediaPipe Image
+        # Build the MediaPipe frame.
         mp_image = mp.Image(
             image_format=mp.ImageFormat.SRGB,
             data=rgb_frame
         )
 
-        #Correct timestamp (manual counter is safer)
+        # Use the frame timestamp.
         timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
 
         result = landmarker.detect_for_video(mp_image, timestamp_ms)
@@ -183,6 +183,36 @@ with FaceLandmarker.create_from_options(options) as landmarker:
 
         if face:
             noddTracker.update(face, timestamp_ms)
+            if noddTracker.isDownNod:
+                print("Sent DOWN gesture")
+                try:
+                    requests.post("http://127.0.0.1:5000/trigger-gesture", json={"gesture": "DOWN"}, timeout=0.5)
+                except Exception as e:
+                    print("Flask request failed:", e)
+                noddTracker.isDownNod = False
+
+            elif noddTracker.isUpNod:
+                print("Sent UP gesture")
+                try:
+                    requests.post("http://127.0.0.1:5000/trigger-gesture", json={"gesture": "UP"}, timeout=0.5)
+                except Exception as e:
+                    print("Flask request failed:", e)
+                noddTracker.isUpNod = False
+            elif noddTracker.isLeftNod:
+                print("Sent LEFT gesture")
+                try:
+                    requests.post("http://127.0.0.1:5000/trigger-gesture", json={"gesture": "LEFT"}, timeout=0.5)
+                except Exception as e:
+                    print("Flask request failed:", e)
+                noddTracker.isLeftNod = False
+            elif noddTracker.isRightNod:
+                print("Sent RIGHT gesture")
+                try:
+                    requests.post("http://127.0.0.1:5000/trigger-gesture", json={"gesture": "RIGHT"}, timeout=0.5)
+                except Exception as e:
+                    print("Flask request failed:", e)
+                noddTracker.isRightNod = False
+
         #Display
         cv2.imshow("Face Landmarker", cv2.flip(frame, 1))
 
