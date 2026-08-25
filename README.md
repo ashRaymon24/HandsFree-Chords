@@ -44,6 +44,7 @@ UP/DOWN navigation is based on the user's current position on the page, so it ca
 Start the Flask server:
 
 ```bash
+cd backend
 python app.py
 ```
 
